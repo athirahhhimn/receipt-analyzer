@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receipt & Expense Analyzer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+
+<body class="bg-light">
+
+    <div class="container mt-5">
+        <div class="row justify-content-center">
+            <div class="col-md-8">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-primary text-white">
+                        <h4 class="mb-0">Upload a Receipt</h4>
+                    </div>
+                    <div class="card-body">
+                        <form id="upload-form">
+                            <div class="mb-3">
+                                <label for="receipt-image" class="form-label">Select Receipt Image (JPG/PNG)</label>
+                                <input class="form-control" type="file" id="receipt-image" accept="image/*" required>
+                            </div>
+                            <button type="submit" class="btn btn-success w-100" id="submit-btn">Analyze Receipt</button>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="card shadow-sm mt-4 d-none" id="results-card">
+                    <div class="card-header bg-dark text-white">
+                        <h5 class="mb-0">Extracted Expense Data</h5>
+                    </div>
+                    <div class="card-body">
+                        <pre id="json-output" class="bg-light p-3 border rounded"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Grab the backend URL passed dynamically from main.py
+        const BACKEND_URL = "{{ backend_url }}";
+
+        document.getElementById('upload-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const fileInput = document.getElementById('receipt-image');
+            const submitBtn = document.getElementById('submit-btn');
+            const resultsCard = document.getElementById('results-card');
+            const jsonOutput = document.getElementById('json-output');
+
+            if (fileInput.files.length === 0) return;
+
+            // Visual feedback while loading
+            submitBtn.disabled = true;
+            submitBtn.innerText = "Processing with AI...";
+            resultsCard.classList.add('d-none');
+
+            // Package the image into a FormData object
+            const formData = new FormData();
+            formData.append("file", fileInput.files[0]);
+
+            try {
+                // Send the image to your partner's backend endpoint (assuming they use /analyze)
+                const response = await fetch(`${BACKEND_URL}/analyze`, {
+                    method: 'POST',
+                    body: formData // Note: Do NOT set Content-Type manually when sending FormData
+                });
+
+                const data = await response.json();
+
+                // Display the results
+                jsonOutput.textContent = JSON.stringify(data, null, 2);
+                resultsCard.classList.remove('d-none');
+
+            } catch (error) {
+                jsonOutput.textContent = "Error connecting to backend: " + error.message;
+                resultsCard.classList.remove('d-none');
+            } finally {
+                // Reset button state
+                submitBtn.disabled = false;
+                submitBtn.innerText = "Analyze Receipt";
+            }
+        });
+    </script>
+</body>
+
+</html>
