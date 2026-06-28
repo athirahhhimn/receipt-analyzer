@@ -1,0 +1,5 @@
+**/__pycache__/
+**/.venv/
+
+Ignore the .env file in the backend directory
+backedn/.env
