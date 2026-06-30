@@ -2,17 +2,18 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from fastapi import FastAPI, File, Query, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
+
+from . import database
+from . import extractor
+
 from dotenv import load_dotenv
 
-# auto-load .env BEFORE anything reads env vars 
+# auto-load .env BEFORE anything reads env vars
 load_dotenv()
 
-from fastapi import FastAPI, File, Query, UploadFile  
-from fastapi.exceptions import RequestValidationError  
-from fastapi.responses import FileResponse, JSONResponse 
-
-import database  
-import extractor  
 
 # Configuration
 
@@ -80,8 +81,9 @@ def _to_response(endpoint: str, exc: Exception) -> JSONResponse:
 
 # Image storage helpers
 
+
 def _save_image(receipt_id: int, file_bytes: bytes, content_type: str) -> str | None:
-    """Save the uploaded file to disk as data/uploads/{receipt_id}.ext. """
+    """Save the uploaded file to disk as data/uploads/{receipt_id}.ext."""
     ext = _EXT_MAP.get((content_type or "").lower().strip())
     if ext is None:
         return None
@@ -100,6 +102,7 @@ def _get_image_path(receipt_id: int, image_ext: str | None) -> Path | None:
 
 
 # App setup
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -137,6 +140,7 @@ async def _unhandled_handler(request, exc: Exception) -> JSONResponse:
 
 # Health check
 
+
 @app.get("/")
 def health() -> dict:
     """Health check — returns {"status": "ok"}."""
@@ -148,7 +152,7 @@ def health() -> dict:
 
 @app.post("/receipts/upload")
 def upload_receipt(file: UploadFile = File(...)):
-    
+
     endpoint = "POST /receipts/upload"
     try:
         content = file.file.read()
@@ -187,7 +191,7 @@ def upload_receipt(file: UploadFile = File(...)):
             items=data["items"],
         )
 
-        # save the original image for preview 
+        # save the original image for preview
         ext = _save_image(saved["id"], content, file.content_type or "")
         if ext:
             try:
@@ -197,7 +201,7 @@ def upload_receipt(file: UploadFile = File(...)):
                         (ext, saved["id"]),
                     )
             except Exception:
-                pass  
+                pass
 
         # Clear insights cache so new spending is reflected
         try:
@@ -304,6 +308,7 @@ def delete_receipt(receipt_id: int):
 
 
 # Analytics
+
 
 @app.get("/analytics")
 def get_analytics(
