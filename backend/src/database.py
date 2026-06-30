@@ -1,208 +1,439 @@
 import os
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, File, UploadFile
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-
-import database
-import extractor
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 # Configuration
 
-def _max_file_size_mb() -> int:
-    
-    try:
-        return int(os.environ.get("MAX_FILE_SIZE_MB", "10"))
-    except ValueError:
-        print("[backend] MAX_FILE_SIZE_MB is not a number; defaulting to 10")
-        return 10
+_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "receipts.db"
+DB_PATH: str = os.environ.get("DB_PATH", str(_DEFAULT_DB_PATH))
 
+DEFAULT_CURRENCY: str = "MYR"
 
-MAX_FILE_SIZE_MB: int = _max_file_size_mb()
-MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
-
-
-# Error helpers
-
-def _error(status_code: int, message: str, detail: str = "") -> JSONResponse:
-  
-    return JSONResponse(
-        status_code=status_code,
-        content={"error": message, "detail": str(detail)},
-    )
-
-
-def _log(endpoint: str, exc: Exception) -> None:
-   
-    print(f"[backend] {endpoint} failed: {type(exc).__name__}: {exc}")
-
-
-_ERROR_MAP: tuple[tuple[type[Exception], int, str], ...] = (
-    (extractor.UnsupportedFileTypeError, 400, "Unsupported file type"),
-    (extractor.UnreadableReceiptError, 422, "Receipt could not be read"),
-    (extractor.ExtractionFailedError, 422, "Could not extract the receipt"),
-    (extractor.MissingApiKeyError, 500, "Server is not configured"),
-    (database.DatabaseError, 500, "Database error"),
-    (ValueError, 400, "Invalid input"),
+VALID_CATEGORIES: tuple[str, ...] = (
+    "food",
+    "transport",
+    "utilities",
+    "shopping",
+    "entertainment",
+    "health",
+    "education",
+    "other",
 )
 
 
-def _to_response(endpoint: str, exc: Exception) -> JSONResponse:
-    _log(endpoint, exc)
-    for exc_type, status_code, message in _ERROR_MAP:
-        if isinstance(exc, exc_type):
-            return _error(status_code, message, str(exc))
-    return _error(500, "Internal server error", str(exc))
+# Custom exceptions
+
+class DatabaseError(Exception):
+    """Raised when any database operation fails."""
 
 
-# App setup
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    database.init_db()
-    uid = database.get_default_user_id()
-    print(f"[backend] database ready at {database.DB_PATH}")
-    print(f"[backend] default user id: {uid}")
-    print(f"[backend] max upload size: {MAX_FILE_SIZE_MB} MB")
-    yield
+class DuplicateReceiptError(DatabaseError):
+    """Raised when a receipt with the same merchant, date, and total exists."""
 
 
-app = FastAPI(
-    title="Receipt & Expense Analyzer API",
-    version="0.1.0",
-    lifespan=lifespan,
-)
+# Connection handling
 
 
-@app.exception_handler(RequestValidationError)
-async def _validation_handler(request, exc: RequestValidationError) -> JSONResponse:
-    print(f"[backend] validation error on {request.url.path}: {exc}")
-    return _error(422, "Invalid request", "One or more fields are missing or invalid")
+def _ensure_parent_dir() -> None:
+    """Create the folder for the database file if it does not exist."""
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 
-@app.exception_handler(Exception)
-async def _unhandled_handler(request, exc: Exception) -> JSONResponse:
-    print(
-        f"[backend] unhandled error on {request.url.path}: {type(exc).__name__}: {exc}"
+@contextmanager
+def get_connection() -> Iterator[sqlite3.Connection]:
+    """Open a SQLite connection, commit on success, rollback on error, always close."""
+    _ensure_parent_dir()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# Schema creation
+
+def init_db() -> None:
+    """Create tables if they do not already exist. Safe to call on every startup."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS receipts (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    merchant   TEXT,
+                    date       TEXT,
+                    total      REAL,
+                    currency   TEXT DEFAULT 'MYR',
+                    image_ext  TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS items (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    receipt_id INTEGER NOT NULL,
+                    name       TEXT NOT NULL,
+                    price      REAL NOT NULL,
+                    category   TEXT NOT NULL,
+                    FOREIGN KEY (receipt_id) REFERENCES receipts (id)
+                )
+                """
+            )
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to initialise the database: {exc}") from exc
+
+
+# Helpers
+
+def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string."""
+    return datetime.now(UTC).isoformat()
+
+
+def normalize_category(category: str | None) -> str:
+    """Map any category value onto one of the allowed VALID_CATEGORIES."""
+    if category is None:
+        return "other"
+    cleaned = category.strip().lower()
+    return cleaned if cleaned in VALID_CATEGORIES else "other"
+
+
+# Duplicate detection
+
+def check_duplicate(
+    merchant: str | None, receipt_date: str | None, total: float | None
+) -> dict | None:
+    """Check if a receipt with the same merchant, date, and total already exists.
+
+    All three fields must match (including None == None).
+
+    Args:
+        merchant: the merchant name.
+        receipt_date: the receipt date as "YYYY-MM-DD".
+        total: the receipt total.
+
+    Returns:
+        dict: the existing receipt if found, None otherwise.
+    """
+    try:
+        with get_connection() as conn:
+            if merchant is None and receipt_date is None and total is None:
+                return None
+
+            row = conn.execute(
+                """
+                SELECT id, merchant, date, total, currency, created_at
+                FROM receipts
+                WHERE merchant IS ? AND date IS ? AND total IS ?
+                LIMIT 1
+                """,
+                (merchant, receipt_date, total),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to check duplicate: {exc}") from exc
+
+    return dict(row) if row is not None else None
+
+
+# Receipts + items
+
+def create_receipt(
+    merchant: str | None,
+    receipt_date: str | None,
+    total: float | None,
+    currency: str | None,
+    items: list[dict],
+    image_ext: str | None = None,
+) -> dict:
+    """Save one receipt and all of its items in a single transaction.
+
+    Args:
+        merchant: shop name, or None if unreadable.
+        receipt_date: receipt date as "YYYY-MM-DD", or None.
+        total: receipt total, or None.
+        currency: currency code; defaults to "MYR".
+        items: list of {"name", "price", "category"} dicts.
+        image_ext: file extension of the saved image (e.g. ".jpg"), or None.
+
+    Returns:
+        dict: the saved receipt with its items.
+    """
+    currency = currency or DEFAULT_CURRENCY
+    created_at = _now_iso()
+    try:
+        with get_connection() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO receipts
+                    (merchant, date, total, currency, image_ext, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (merchant, receipt_date, total, currency, image_ext, created_at),
+            )
+            receipt_id = cursor.lastrowid
+
+            for item in items:
+                conn.execute(
+                    """
+                    INSERT INTO items (receipt_id, name, price, category)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_id,
+                        item["name"],
+                        float(item["price"]),
+                        normalize_category(item.get("category")),
+                    ),
+                )
+    except (sqlite3.Error, KeyError, ValueError, TypeError) as exc:
+        raise DatabaseError(f"Failed to save receipt: {exc}") from exc
+
+    saved = get_receipt(receipt_id)
+    if saved is None:
+        raise DatabaseError("Receipt was saved but could not be read back")
+    return saved
+
+
+def get_all_receipts() -> list[dict]:
+    """Return all receipts, newest first, WITHOUT items."""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, merchant, date, total, currency, image_ext, created_at
+                FROM receipts
+                ORDER BY created_at DESC, id DESC
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to list receipts: {exc}") from exc
+
+    return [dict(row) for row in rows]
+
+
+def get_receipt(receipt_id: int) -> dict | None:
+    """Return one receipt WITH its items, or None if not found."""
+    try:
+        with get_connection() as conn:
+            receipt_row = conn.execute(
+                """
+                SELECT id, merchant, date, total, currency, image_ext, created_at
+                FROM receipts WHERE id = ?
+                """,
+                (receipt_id,),
+            ).fetchone()
+
+            if receipt_row is None:
+                return None
+
+            item_rows = conn.execute(
+                """
+                SELECT id, receipt_id, name, price, category
+                FROM items WHERE receipt_id = ? ORDER BY id
+                """,
+                (receipt_id,),
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to fetch receipt {receipt_id}: {exc}") from exc
+
+    receipt = dict(receipt_row)
+    receipt["items"] = [dict(row) for row in item_rows]
+    return receipt
+
+
+def delete_receipt(receipt_id: int) -> bool:
+    """Delete a receipt and all of its items. Returns True if it existed."""
+    try:
+        with get_connection() as conn:
+            conn.execute("DELETE FROM items WHERE receipt_id = ?", (receipt_id,))
+            cursor = conn.execute("DELETE FROM receipts WHERE id = ?", (receipt_id,))
+            return cursor.rowcount > 0
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to delete receipt {receipt_id}: {exc}") from exc
+
+
+# Analytics 
+
+def get_analytics(start: str | None = None, end: str | None = None) -> dict:
+    """Return spending breakdown by category plus totals.
+    """
+    where_parts: list[str] = []
+    params: list[str] = []
+
+    if start:
+        where_parts.append("r.date >= ?")
+        params.append(start)
+    if end:
+        where_parts.append("r.date <= ?")
+        params.append(end)
+
+    date_filter = ""
+    if where_parts:
+        date_filter = " AND r.date IS NOT NULL AND " + " AND ".join(where_parts)
+
+    try:
+        with get_connection() as conn:
+            category_rows = conn.execute(
+                f"""
+                SELECT i.category AS category, SUM(i.price) AS total
+                FROM items i
+                JOIN receipts r ON i.receipt_id = r.id
+                WHERE 1=1 {date_filter}
+                GROUP BY i.category
+                ORDER BY total DESC
+                """,
+                params,
+            ).fetchall()
+
+            count_row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS n FROM receipts r
+                WHERE 1=1 {date_filter}
+                """,
+                params,
+            ).fetchone()
+
+            range_row = conn.execute(
+                f"""
+                SELECT MIN(r.date) AS start, MAX(r.date) AS end
+                FROM receipts r
+                WHERE r.date IS NOT NULL{date_filter}
+                """,
+                params,
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to build analytics: {exc}") from exc
+
+    breakdown = {row["category"]: round(row["total"], 2) for row in category_rows}
+    total_spent = round(sum(breakdown.values()), 2)
+
+    return {
+        "category_breakdown": breakdown,
+        "total_spent": total_spent,
+        "receipt_count": count_row["n"],
+        "date_range": {"start": range_row["start"], "end": range_row["end"]},
+    }
+
+
+def get_spending_last_30_days() -> dict:
+    """Gather the last 30 days of spending for AI insights."""
+    period_end = date.today()
+    period_start = period_end - timedelta(days=30)
+    start_str = period_start.isoformat()
+
+    try:
+        with get_connection() as conn:
+            category_rows = conn.execute(
+                """
+                SELECT i.category AS category, SUM(i.price) AS total
+                FROM items i
+                JOIN receipts r ON i.receipt_id = r.id
+                WHERE r.date IS NOT NULL AND r.date >= ?
+                GROUP BY i.category
+                ORDER BY total DESC
+                """,
+                (start_str,),
+            ).fetchall()
+
+            count_row = conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM receipts
+                WHERE date IS NOT NULL AND date >= ?
+                """,
+                (start_str,),
+            ).fetchone()
+
+            biggest_row = conn.execute(
+                """
+                SELECT i.name AS name, i.price AS price
+                FROM items i
+                JOIN receipts r ON i.receipt_id = r.id
+                WHERE r.date IS NOT NULL AND r.date >= ?
+                ORDER BY i.price DESC LIMIT 1
+                """,
+                (start_str,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to build 30-day summary: {exc}") from exc
+
+    category_totals = {row["category"]: round(row["total"], 2) for row in category_rows}
+    biggest_expense = (
+        {"name": biggest_row["name"], "price": round(biggest_row["price"], 2)}
+        if biggest_row is not None
+        else None
     )
-    return _error(500, "Internal server error", str(exc))
+
+    return {
+        "category_totals": category_totals,
+        "total_spent": round(sum(category_totals.values()), 2),
+        "receipt_count": count_row["n"],
+        "biggest_expense": biggest_expense,
+        "period_start": start_str,
+        "period_end": period_end.isoformat(),
+    }
 
 
-# Health check
+# Spending timeline (for the chart)
 
-@app.get("/")
-def health() -> dict:
-    return {"status": "ok"}
+def get_spending_timeline(period: str = "weekly") -> list[dict]:
+    """Return spending grouped by time period for charting."""
 
+    if period == "monthly":
+        group_expr = "strftime('%Y-%m', r.date)"
+    else:
+        group_expr = "strftime('%Y-%m-%d', r.date, 'weekday 0', '-6 days')"
 
-# Receipts
-
-@app.post("/receipts/upload")
-def upload_receipt(file: UploadFile = File(...)):
-   
-    endpoint = "POST /receipts/upload"
     try:
-        user_id = database.get_default_user_id()
+        with get_connection() as conn:
+            total_rows = conn.execute(
+                f"""
+                SELECT {group_expr} AS period, SUM(i.price) AS total
+                FROM items i
+                JOIN receipts r ON i.receipt_id = r.id
+                WHERE r.date IS NOT NULL
+                GROUP BY period
+                ORDER BY period
+                """
+            ).fetchall()
 
-        content = file.file.read()
+            cat_rows = conn.execute(
+                f"""
+                SELECT {group_expr} AS period, i.category, SUM(i.price) AS total
+                FROM items i
+                JOIN receipts r ON i.receipt_id = r.id
+                WHERE r.date IS NOT NULL
+                GROUP BY period, i.category
+                ORDER BY period
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        raise DatabaseError(f"Failed to build timeline: {exc}") from exc
 
-        if len(content) == 0:
-            return _error(400, "Empty file", "The uploaded file has no content")
-        if len(content) > MAX_FILE_SIZE_BYTES:
-            return _error(
-                400,
-                "File too large",
-                f"Maximum allowed size is {MAX_FILE_SIZE_MB} MB",
-            )
+    cat_map: dict[str, dict[str, float]] = {}
+    for row in cat_rows:
+        p = row["period"]
+        if p not in cat_map:
+            cat_map[p] = {}
+        cat_map[p][row["category"]] = round(row["total"], 2)
 
-        result = extractor.extract_receipt(content, file.content_type or "")
-        data = result.model_dump()
+    return [
+        {
+            "period": row["period"],
+            "total": round(row["total"], 2),
+            "categories": cat_map.get(row["period"], {}),
+        }
+        for row in total_rows
+    ]
 
-        saved = database.create_receipt(
-            user_id=user_id,
-            merchant=data["merchant"],
-            date=data["date"],
-            total=data["total"],
-            currency=data["currency"],
-            items=data["items"],
-        )
-
-        data["receipt_id"] = saved["id"]
-        return data
-    except Exception as exc:
-        return _to_response(endpoint, exc)
-
-
-@app.get("/receipts")
-def list_receipts():
-    
-    endpoint = "GET /receipts"
-    try:
-        user_id = database.get_default_user_id()
-        return database.get_receipts_for_user(user_id)
-    except Exception as exc:
-        return _to_response(endpoint, exc)
-
-
-@app.get("/receipts/{receipt_id}")
-def get_receipt(receipt_id: int):
-    
-    endpoint = f"GET /receipts/{receipt_id}"
-    try:
-        receipt = database.get_receipt(receipt_id)
-        if receipt is None:
-            return _error(404, "Receipt not found", f"No receipt with id {receipt_id}")
-        return receipt
-    except Exception as exc:
-        return _to_response(endpoint, exc)
-
-
-@app.delete("/receipts/{receipt_id}")
-def delete_receipt(receipt_id: int):
-  
-    endpoint = f"DELETE /receipts/{receipt_id}"
-    try:
-        deleted = database.delete_receipt(receipt_id)
-        if not deleted:
-            return _error(404, "Receipt not found", f"No receipt with id {receipt_id}")
-        return {"deleted": True, "id": receipt_id}
-    except Exception as exc:
-        return _to_response(endpoint, exc)
-
-
-# Analytics
-
-
-@app.get("/analytics")
-def get_analytics():
-    
-    endpoint = "GET /analytics"
-    try:
-        user_id = database.get_default_user_id()
-        return database.get_analytics(user_id)
-    except Exception as exc:
-        return _to_response(endpoint, exc)
-
-
-@app.get("/analytics/insights")
-def get_insights():
-    
-    endpoint = "GET /analytics/insights"
-    try:
-        user_id = database.get_default_user_id()
-
-        try:
-            import analyzer
-        except ImportError as exc:
-            _log(endpoint, exc)
-            return _error(
-                503,
-                "Insights not available yet",
-                "analyzer.py has not been added.",
-            )
-
-        insight = analyzer.generate_insights(user_id)
-        return insight.model_dump()
-    except Exception as exc:
-        return _to_response(endpoint, exc)
+init_db()
