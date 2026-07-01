@@ -5,11 +5,14 @@ from pathlib import Path
 from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from . import database
 from . import extractor
-
-from dotenv import load_dotenv
 
 # auto-load .env BEFORE anything reads env vars
 load_dotenv()
@@ -119,6 +122,13 @@ app = FastAPI(
     title="Receipt & Expense Analyzer API",
     version="0.2.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
