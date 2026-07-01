@@ -5,8 +5,8 @@ import time
 from google.genai import errors, types
 from pydantic import BaseModel, ValidationError, field_validator
 
-import database
-import extractor
+from . import database
+from . import extractor
 
 # Configuration
 
