@@ -215,7 +215,7 @@ def upload_receipt(file: UploadFile = File(...)):
 
         # Clear insights cache so new spending is reflected
         try:
-            import analyzer
+            from . import analyzer
 
             analyzer.clear_cache()
         except ImportError:
@@ -306,7 +306,7 @@ def delete_receipt(receipt_id: int):
 
         # Clear insights cache
         try:
-            import analyzer
+            from . import analyzer
 
             analyzer.clear_cache()
         except ImportError:
@@ -344,7 +344,7 @@ def get_insights():
     endpoint = "GET /analytics/insights"
     try:
         try:
-            import analyzer
+            from . import analyzer
         except ImportError as exc:
             _log(endpoint, exc)
             return _error(503, "Insights not available yet", "analyzer.py not found.")
