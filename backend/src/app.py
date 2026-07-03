@@ -8,11 +8,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 
-from dotenv import load_dotenv
-load_dotenv()
-
 from . import database
 from . import extractor
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # auto-load .env BEFORE anything reads env vars
 load_dotenv()
