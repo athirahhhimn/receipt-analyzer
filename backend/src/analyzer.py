@@ -233,16 +233,7 @@ def _empty_insight() -> SpendingInsight:
 # Public API (called by app.py)
 
 def generate_insights(use_cache: bool = True) -> SpendingInsight:
-    """Generate (or return a cached) spending insight.
-
-    No user_id needed — analyses all receipts in the database.
-
-    Args:
-        use_cache: if True (default), return a cached insight when fresh.
-
-    Returns:
-        SpendingInsight: the validated insight.
-    """
+    """Generate (or return a cached) spending insight. """
     if use_cache:
         cached = _get_cached()
         if cached is not None:
