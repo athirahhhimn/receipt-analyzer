@@ -10,8 +10,6 @@ A full-stack web application that extracts structured data from receipt images a
 
 Tracking daily expenses manually is tedious and error-prone. People collect paper receipts that pile up, get lost, or are forgotten. Even when someone tries to record their spending, they have to type out every item, categorise it, and calculate totals themselves. Most people give up after a few days because the effort outweighs the benefit.
 
-Malaysian receipts add extra complexity: they mix English and Malay (Bahasa Malaysia), use local terms like "Jumlah" for total and "Cukai" for tax, and follow date formats that differ from international standards. Generic expense trackers don't handle these well.
-
 ### Target Users
 
 This system is built for individuals in Malaysia who want to understand where their money goes without the effort of manual data entry. The typical user takes a photo of their receipt after a purchase and uploads it. The AI handles the rest — reading the receipt, extracting items and prices, categorising spending, and offering advice.
