@@ -114,18 +114,7 @@ def normalize_category(category: str | None) -> str:
 def check_duplicate(
     merchant: str | None, receipt_date: str | None, total: float | None
 ) -> dict | None:
-    """Check if a receipt with the same merchant, date, and total already exists.
-
-    All three fields must match (including None == None).
-
-    Args:
-        merchant: the merchant name.
-        receipt_date: the receipt date as "YYYY-MM-DD".
-        total: the receipt total.
-
-    Returns:
-        dict: the existing receipt if found, None otherwise.
-    """
+    """Check if a receipt with the same merchant, date, and total already exists."""
     try:
         with get_connection() as conn:
             if merchant is None and receipt_date is None and total is None:
@@ -156,19 +145,7 @@ def create_receipt(
     items: list[dict],
     image_ext: str | None = None,
 ) -> dict:
-    """Save one receipt and all of its items in a single transaction.
-
-    Args:
-        merchant: shop name, or None if unreadable.
-        receipt_date: receipt date as "YYYY-MM-DD", or None.
-        total: receipt total, or None.
-        currency: currency code; defaults to "MYR".
-        items: list of {"name", "price", "category"} dicts.
-        image_ext: file extension of the saved image (e.g. ".jpg"), or None.
-
-    Returns:
-        dict: the saved receipt with its items.
-    """
+    """Save one receipt and all of its items in a single transaction."""
     currency = currency or DEFAULT_CURRENCY
     created_at = _now_iso()
     try:
