@@ -189,7 +189,6 @@ def upload_receipt(file: UploadFile = File(...)):
                 f"A receipt from {existing['merchant'] or 'unknown'} on "
                 f"{existing['date'] or 'unknown date'} for "
                 f"{existing['total'] or '?'} already exists (id {existing['id']}). "
-                "Upload anyway by deleting the original first.",
             )
 
         # Save to database (image_ext is set after we know the receipt_id)
@@ -354,20 +353,3 @@ def get_insights():
     except Exception as exc:
         return _to_response(endpoint, exc)
 
-
-@app.get("/analytics/timeline")
-def get_timeline(
-    period: str = Query("weekly", description="'weekly' or 'monthly'"),
-):
-    """Return spending grouped by week or month for charting.
-
-    Query param:
-      ?period=weekly   (default) group by week
-      ?period=monthly  group by month
-    """
-    try:
-        if period not in ("weekly", "monthly"):
-            return _error(400, "Invalid period", "Must be 'weekly' or 'monthly'")
-        return database.get_spending_timeline(period=period)
-    except Exception as exc:
-        return _to_response("GET /analytics/timeline", exc)
